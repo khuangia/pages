@@ -1,0 +1,22 @@
+
+title:   'Writeups'
+author:
+  name:  'KAI'
+
+path: /pages
+url:  'http://khuangia.github.io/pages'
+
+markdown: kramdown
+
+sass:
+  sass_dir: css
+  style:    expanded
+
+permalink: /:title.html
+
+exclude:
+- README.md
+
+safe: true
+lsi: false
+
