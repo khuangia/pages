@@ -167,7 +167,8 @@ IDA 进入`kernelbase!CreateProcessInternalW`。进程可以简单看作代码�
 通过 ida 可以看到参数检查过程中有些 *NtVdm* 的处理逻辑，*NtVdm* 开头的都是给 16 位程序运行做的一些兼容，当启动16 位程序时，实际 *ntvdm*.exe* 作为主程序运行，提供一个模拟环境。
 
 > *if (IsBasepProcessInvalidImagePresent()) {*
-   > *NtVdm64CreateProcessInternalW(... lpApplicatioinName ...*
+>     *NtVdm64CreateProcessInternalW(... lpApplicatioinName ...*
+> 
 
 x64 已经不支持 16位了，略过。[https://learn.microsoft.com/en-us/troubleshoot/windows-client/application-management/x64-windows-not-support-16-bit-programs](https://learn.microsoft.com/en-us/troubleshoot/windows-client/application-management/x64-windows-not-support-16-bit-programs)
 
@@ -180,17 +181,11 @@ CreateProcessInternalW 开头生成的一部分环境设置相关的配置与属
 前面这部分可以总结为以下流程：
 
 *CreateProcessInternalW*
-
-   *→ Validate Parameters*
-
-   *→ Generate Attributes List*
-
-   *→ Get Process Image File Path*
-
-   *→ Generate _RTL_USER_PROCESS_PARAMETERS*
-
-   *→ NtCreateUserProcess*
-
+   →* Validate Parameters*
+   →* Generate Attributes List*
+   →* Get Process Image File Path*
+   →* Generate _RTL_USER_PROCESS_PARAMETERS*
+   →* NtCreateUserProcess*
    ...
 
 + PEB 结构体保存的 _RTL_USER_PROCESS_PARAMETERS 定义
@@ -276,10 +271,11 @@ NTSTATUS __stdcall NtCreateUserProcess(
 
 参数读入后，先使用`ntoskrnl!IoCreateFileEx` 打开主程序文件，再用 `ntoskrnl!MmCreateSection` 为文件创建 Section 对象给后续使用
 
-> *→ driverContext = PspCreateUserProcessEcp (GUID_ECP_CREATE_USER_PROCESS, ...*
-> *→ IoCreateFileEx (lpApplicationPath, ..., driverContext)*
+> → *driverContext = PspCreateUserProcessEcp (GUID_ECP_CREATE_USER_PROCESS, ...*
+> → *IoCreateFileEx (lpApplicationPath, ..., driverContext)*
 > → *MmCreateSpecialImageSection*
-> → MiCr*eateSection*
+> → *MiCreateSection*
+> 
 
 这个步骤目前发生在创建者进程中，Section 创建过程还需要校验 PE 格式，检查目标程序的有效性。Win10 之前这里是 ZwOpenFile，换 IoCreateFileEx 可以支持传递一个 Ecp
 
@@ -297,11 +293,12 @@ CreateFile 进入 R0 后依次经过 `Nt/Io/Ob`，然后构造 IRP，从设备�
 
    > tips: 识别那些使用 NtCreateProcessEx 避免触发进程创建消息而逃避查杀的行为
    > 过程举例：
-   1. > 加载器以 DELETE_ON_CLOSE 打开一个白文件，写入payload EXE
-   2. > 加载器 map EXE 到内存，NtCreateSection
-   3. > 以 Section 创建进程 NtCreateProcessEx，这里不会触发进程回调
-   4. > 关闭文件句柄，因为 DELETE_ON_CLOSE，文件会被删除，或者这一步用事件回滚白文件
-   5. > NtCreateThreadEx 创建线程，这里会触发进程回调，但是杀软找不到恶意文件了
+   > 1. 加载器以 DELETE_ON_CLOSE 打开一个白文件，写入payload EXE
+   > 2. 加载器 map EXE 到内存，NtCreateSection
+   > 3. 以 Section 创建进程 NtCreateProcessEx，这里不会触发进程回调
+   > 4. 关闭文件句柄，因为 DELETE_ON_CLOSE，文件会被删除，或者这一步用事件回滚白文件
+   > 5. NtCreateThreadEx 创建线程，这里会触发进程回调，但是杀软找不到恶意文件了
+   >
    > 对抗部分，安全软件可以在第 2步 PostCreate 确认创建动作是否带 *GUID_ECP_CREATE_USER_PROCESS*，在第 5步进程创建回调中查看进程对应 FileObject 是否有这个标记，没有的就是在尝试逃避扫描的
 
 继续向前，主程序打开后，使用文件句柄调用 `MmCreateSection`
@@ -367,6 +364,7 @@ Section 创建出来后，仅代表内存结构已经建立，想要在进程中
    > `→KeAcquireGuardedMutex (&((PROCESS)->AddressCreationLock))`
    > `MiMapViewOfXXX ...`
    > `UNLOCK_ADDRESS_SPACE (Process);`
+   >
 
 经过上面的步骤，我们可以实现共享文件的内存，但是要安全的共享，还需要`Copy-On-Write`。
 
@@ -533,14 +531,12 @@ typedef struct _OBJECT_TYPE_INITIALIZER {
 成员中需要特别关注：
 
 1. `"EPROCESS.Pcb.DirectoryTableBase"`这是进程页表的物理基址，就是 PML4 起始位置的物理页号，CPU运行时，取到的进程虚拟地址都要经过对页表的查表得到物理地址。进程切换的时候，内核 CR3 取这个值。
-
    除了有 `DirectoryTableBase`，还有 `UserDirectoryTableBase`。一个进程，按之前的讨论，一个页表就够了。这里用了两个页表，是为了解决之前的 Meltdown 用户态程序可以任意读内核数据的问题。
 
 2. `"EPROCESS.VadRoot"`这是一颗 AVL 树，记录了属于当前进程的虚拟地址，进程 VirtualAlloc 出来的，包括堆和文件映射的内存，主要是用户空间，内核内存的虚拟地址像 ExAllocatePool 有内核虚拟地址管理的方法。
-
    每个VadRoot 的项都是一个MMVAD，定义了保护属性、地址、大小、是否空闲等。所有call 到 `Nt...Virtual.../Virtual...` 的API 都会操作 Vad。
 
-   + MMVAD
++ MMVAD
 
 ```other
 typedef struct _MMVAD_SHORT {
@@ -578,7 +574,6 @@ typedef struct _MMVAD {
 
 1. 创建用户页表。`MiAllocateTopLevelPage` 创建 User 页表，页表物理页号给 `EPROCESS.Pcb.UserDirectoryTableBase`，也就是 User CR3。页表虚拟地址给 `EPROCESS.Vm.Shared.ShadowMapping`，后续内核从这里操作用户页表。
 2. 创建内核页表，同步高位 256项。`MiAllocateTopLevelPage` 创建内核页表，然后`MiCopyTopLevelMappings` 从 System 进程同步内核部分进来。
-
    将 System 页表内核部分，就是高位 256项，复制到进程内核页表，相当于保持所有进程页表内核部分一致。函数退出前会释放`MiAllocateTopLevelPage` 生成的 Va，修改页表中的自引用记录指向本进程的 Kernel CR3。内核操作页表时总是将目标页表映射到 HyperSpace，这样Map 的地址不会跟当前页表内容冲突。
 
 ```other
@@ -590,12 +585,10 @@ MiReleasePtes(&MiState.Vs.SystemPteInfo.LowestBitEverAllocated, kcr3_Va, 1i64);
 
 3. 同步用户页表。使用`MiShadowTopLevelPxes` 填充一部分用户页表，这部分主要是取 System 进程的 `Vm.Shared.ShadowMapping` 写入新进程 Mapping。
    1. System 的 Mapping 在系统启动过程初始化控制结构时由 `KiShadowProcessorAllocation` 填充。里面主要是 `ntoskrnl[.KVASCODE]` 节的内容，ida 可定位到这一节
-
       主要 `KiSystemCallXXShadow / KiXXXShadow / XXXInterruptShadow` 等等这些 R3/R0 交互的代码段，因为真实的 SystemCall 不映射，这些 Shadow 代码就负责切换 CR3、堆栈，映射出去当个跳板用
-
-   1. 还有 `ntoskrnl!KUSER_SHARED_DATA`，记录一些调试状态、系统版本之类的信息。
-   2. 这部分页表的内容主要保证每个进程的用户态、内核态正常交互，而其他内存不再映射。
-1. 同步内核表页低 256项
+   2. 还有 `ntoskrnl!KUSER_SHARED_DATA`，记录一些调试状态、系统版本之类的信息。
+   3. 这部分页表的内容主要保证每个进程的用户态、内核态正常交互，而其他内存不再映射。
+4. 同步内核表页低 256项
    1. 内核代码中分配一块内存，比如 NtAllocVirtual，分配成功更新内核页表，同时判断虚拟地址是否在低256 项，如果是则打上`.User` 的标记，然后 `MiWritePteShadow` 写入该条记录到`Vm.Shared.ShadowMapping` 中。上面有说这个 Map 实际是 User CR3 的虚拟地址，这样用户态就能访问这个地址了，本身内核不直接操作用户页表，都是同步
    2. 所以正常情况下内核页表的低 256 项没什么需要初始化，不过用户态还有一个 Session 相关的内容，代表用户会话，不同用户会话之间模块、窗口等隔离，同个会话间共享，进程所属Session 有一个单独的页表，负责记录会话内共享的内存，比如很关键的 win32k 与R3 交互的 `win32k!ghSectionShared`、远程桌面的内存和 DLL Section等，所以新进程初始化时，也需要拷贝这些用户态可共享访问的内容到内核页表，然后写到 `Vm.Shared.ShadowMapping`
 
@@ -763,11 +756,9 @@ Cpu 依靠Context 执行，线程获得执行总是依靠`SwapContext`，以此�
 `PspUserThreadStartup`在 NT4 时，主要是降IRQL，然后插一个指向`ntdll!LdrInitializeThunk`的UserMode APC，当线程返回用户态时，就会执行。现在是构造栈桢，设置好参数、返回地址以及各个寄存器的值，让退出到 R3 的地址直接变成 LdrThunk。Startup 中设置 Context 的函数是 `ntoskrnl!PspInitializeThunkContext`，在这个函数中首先调用 `PspCallThreadNotifyRoutines`，触发线程回调。然后构造两个栈桢：
 
 1. 第一个 Rip 取的`ntdll!LdrInitializeThunk`
-
    线程切到 R3 InitializeThunk，根据条件执行进程的初始化操作。然后call`ZwContinue` 把第二个栈 Pop 出来，之前的栈清空
 
 1. 第二个 Rip 取的`ntdll!RtlUserThreadStart`
-
    栈清空后，`ntdll!RtlUserThreadStart` 作为线程调用栈的第一个函数。这个函数默认使用 `__try/__except` 把要执行的代码包起来，中间调用`kernel32!BaseThreadInitThunk`，其中初始化 TLS 回调，然后 call 到真正的、用户设置的线程 StartAddress 执行
 
 新线程的执行要等后续挂到 Cpu 关联的 `KPCR->KPRCB` 再说，此时线程分配结束。接着回到 `NtCreateUserProcess` 继续完成进程的创建。`ntoskrnl!PspInsertProcess`将进程对象挂到 `ntoskrnl!PsActiveProcessHead`。PG前所谓进程断链隐藏，就是断的这里了。接着调用 `ntoskrnl!PspInsertThread`
@@ -786,23 +777,17 @@ Cpu 依靠Context 执行，线程获得执行总是依靠`SwapContext`，以此�
 在上边 `PspInsertThread` 时，会检查 Job 的情况，在平时的工作中，Job 使用大概几种场景。
 
 1. 最常用的操作就是控制进程同时退出。
-
    `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，一般在主进程创建一个 Job 对象，子进程创建时挂过去，子进程的后续进程都会自动继承。就是 `PspInsertThread` 中的流程。
-
    chrome 的多进程结构就是用 Job 关联的，主进程退出，子进程会跟着退出。这对于依靠某些重要组件才能干活的进程来说很适用。
 
 1. 限制资源使用。
-
    可以限制用多少内存，多少 CPU 这样。跟 linux 的 cgroup 限制有点像
 
 1. 设置优先级
-
    线程的时间片分配策略决定一条线程能得到多少执行时间，`PspApplyJobLimitsToProces`s 中，会调用`KeSetDisableQuantumProcess`，可以使用这个逻辑让Job 占用多数Cpu 时间
 
 1. 还会用到的操作，就是补充 Token 的权限管理能力
-
    Win32k 并不是按照 NT 内核设计实现的，它的对象没有对象头，也就没有 SecurityDescriptor。所以我们能看到 OpenProcess/OpenThread/NtOpenFile 返回ACCESS DENIED，但从来没有 OpenWindow/OpenMessage，而是 FindWindow/GetMessage，直接取，有就能访问。
-
    对于这部分控制权限的缺失，Job 上面做了一些的弥补，[https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions)。可以控制是否能切换桌面、用Job 进程外的句柄、读写剪切板等。
 
 Job 是挂在会话下的，所以服务中的 Job 如果要给登录用户使用，需要 Impersonate 到用户环境创建。沙盒类产品比如 Sandboxie，逻辑里面一般都有 Job，搭配 低权限Token 使用
@@ -810,40 +795,23 @@ Job 是挂在会话下的，所以服务中的 Job 如果要给登录用户使�
 内核底下的创建部分可以总结为以下流程：
 
 *NtCreateUserProcess*
-
-   *→ MmCreateSection (Executable File)*
-
-      *→ IRP_MJ_CREATE*
-
-   *→ PspAllocateProcess (Process Object)*
-
-   *→ MmCreateProcessAddressSpace (Page Table)*
-
-   *→ MmMapViewOfSection*
-
-      *→ IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION*
-
-   *→ PspAllocateThread*
-
-      *→ PspUserThreadStartup*
-
-         *→ usermode PspCallThreadNotifyRoutines*
-
-         *→ R3 ntdll!LdrInitializeThunk*
-
-   *→ PspInsertProcess*
-
-      *→ ObpCallxxxOperationCallbacks (Process)*
-
-   *→ PspInsertThread*
-
-      *→ ObpCallxxxOperationCallbacks (Thread)*
-
-      *→ PspCallProcessNotifyRoutines*
-
-      *→ kernel mode PspCallThreadNotifyRoutines*
-
-*→ return to R3 CreateProcessInternal*
+   →* MmCreateSection (Executable File)*
+      →* IRP_MJ_CREATE*
+   →* PspAllocateProcess (Process Object)*
+   →* MmCreateProcessAddressSpace (Page Table)*
+   →* MmMapViewOfSection*
+      →* IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION*
+   →* PspAllocateThread*
+      →* PspUserThreadStartup*
+         →* usermode PspCallThreadNotifyRoutines*
+         →* R3 ntdll!LdrInitializeThunk*
+   →* PspInsertProcess*
+      →* ObpCallxxxOperationCallbacks (Process)*
+   →* PspInsertThread*
+      →* ObpCallxxxOperationCallbacks (Thread)*
+      →* PspCallProcessNotifyRoutines*
+      →* kernel mode PspCallThreadNotifyRoutines*
+→* return to R3 CreateProcessInternal*
 
 ## 配置新进程
 
@@ -1147,15 +1115,10 @@ DLL 加载路径的选择，代码比较繁杂，也可以 SetDllDirectory 指�
 之后就是搜索 ActCtx。有个判断 `LdrpIsSecureProcess`，安全进程不搜索 ActCtx，安全属性来源于创建进程的时候给 CREATE_SECURE_PROCESS。
 
 `ntdll!LdrpApplyFileNameRedirection`
-
    → `ntdll!ApiSetResolveToHost`
-
    → `ntdll!RtlDosApplyFileIsolationRedirection_Ustr`
-
-      *→ `sxsisol_SearchActCtxForDllName`*
-
+      →* `sxsisol_SearchActCtxForDllName`*
       → `RtlFindActivationContextSectionString`
-
       → `search (Peb.ActivationContextData)`
 
 中间这个 FindActivationXXX 是 Sandboxie Hook 了做注入的函数。在这里注入有 2 个优点，1 是进程空间才加载 ntdll 和 kernel，注入的时机很早，可以 Hook 后续 DLL 的入口函数。2 是这个时间可以构造 ActCtx，用来改变、伪造DLL 的加载路径。不过缺点是这里时机太早，注入的 DLL 最好导入表只依赖 ntdll，CRT 也还没初始化，STL 不能用。
